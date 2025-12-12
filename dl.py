@@ -1,133 +1,121 @@
-"""
-Streamlit Web Interface for Visualizing Layer Freezing in a CNN
-
-Run using:
-    streamlit run layer_freeze_web_app.py
-
-Features:
-- Load a simple CNN
-- UI checkboxes to freeze/unfreeze layers
-- Train on random data for a few steps
-- Visualize which layers changed (bar chart + table)
-
-Requirements:
-    pip install streamlit torch matplotlib
-"""
 import streamlit as st
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import matplotlib.pyplot as plt
-from collections import OrderedDict
+import re
+from collections import Counter
+
+st.set_page_config(page_title="Word2Vec Generator", layout="wide")
+st.title("🧠 Neural Network Word2Vec Embedding Generator")
+
+st.write("Enter corpus text below, adjust parameters, and train a simple Word2Vec model.")
 
 # ------------------------------
-# Model Definition
+# User Inputs
 # ------------------------------
-class SimpleCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.features = nn.Sequential(OrderedDict([
-            ("conv1", nn.Conv2d(1, 8, 3, padding=1)),
-            ("relu1", nn.ReLU()),
-            ("pool1", nn.MaxPool2d(2)),
-            ("conv2", nn.Conv2d(8, 16, 3, padding=1)),
-            ("relu2", nn.ReLU()),
-            ("pool2", nn.MaxPool2d(2)),
-        ]))
+corpus = st.text_area("Enter Text Corpus:", 
+"""Natural language processing enables computers to understand human language.
+Word embeddings map words into continuous vector space.
+Neural networks can be used to learn these embeddings from context words in a document corpus."""
+)
 
-        self.classifier = nn.Sequential(OrderedDict([
-            ("flatten", nn.Flatten()),
-            ("fc1", nn.Linear(16*7*7, 64)),
-            ("relu3", nn.ReLU()),
-            ("fc2", nn.Linear(64, 10)),
-        ]))
-
-    def forward(self, x):
-        x = self.features(x)
-        x = self.classifier(x)
-        return x
+window_size = st.slider("Context Window Size", 1, 5, 2)
+embed_dim = st.slider("Embedding Dimension", 10, 100, 50)
+epochs = st.slider("Training Epochs", 10, 200, 50)
 
 # ------------------------------
-# Helper functions
+# Tokenizer
 # ------------------------------
-def freeze_layers(model, layer_names):
-    for name, param in model.named_parameters():
-        for layer in layer_names:
-            if layer in name:
-                param.requires_grad = False
+def tokenize(text):
+    return re.findall(r"\b\w+\b", text.lower())
 
-
-def snapshot(model):
-    return {name: p.detach().clone() for name, p in model.named_parameters()}
-
-
-def compute_diff(before, after):
-    diffs = {}
-    for k in before:
-        diff = (after[k] - before[k]).abs().max().item()
-        module = k.split('.')[0]
-        diffs.setdefault(module, []).append(diff)
-    return {m: max(v) for m, v in diffs.items()}
-
-
-def train_steps(model, steps=20, lr=1e-2, batch=32):
-    opt = optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
-    loss_fn = nn.CrossEntropyLoss()
-    for _ in range(steps):
-        x = torch.randn(batch, 1, 28, 28)
-        y = torch.randint(0, 10, (batch,))
-        opt.zero_grad()
-        loss = loss_fn(model(x), y)
-        loss.backward()
-        opt.step()
 
 # ------------------------------
-# Streamlit UI
+# Train Button
 # ------------------------------
-st.title("🔐 Layer Freezing Visualizer for CNN (PyTorch)")
-st.write("Select layers to freeze, train the model briefly, and visualize which layers learned.")
+if st.button("Train Word2Vec Model"):
 
-# Initialize model
-model = SimpleCNN()
-layer_options = ["conv1", "conv2", "fc1", "fc2"]
+    tokens = tokenize(corpus)
 
-st.sidebar.header("Freeze Layers")
-freeze_selected = []
-for layer in layer_options:
-    if st.sidebar.checkbox(f"Freeze {layer}"):
-        freeze_selected.append(layer)
+    if len(tokens) < 5:
+        st.error("Please enter more text!")
+        st.stop()
 
-steps = st.sidebar.slider("Training Steps", min_value=5, max_value=100, value=20)
-lr = st.sidebar.number_input("Learning Rate", value=0.01)
-batch = st.sidebar.number_input("Batch Size", value=32)
+    vocab = {w: i for i, w in enumerate(Counter(tokens))}
+    id2word = {i: w for w, i in vocab.items()}
 
-if st.button("Run Training and Visualize"):
-    st.subheader("Results")
+    # ----------------------------------
+    # Generate Skip-gram training pairs
+    # ----------------------------------
+    def generate_pairs(tokens, window=2):
+        pairs = []
+        for i, w in enumerate(tokens):
+            for j in range(max(0, i-window), min(len(tokens), i+window+1)):
+                if i != j:
+                    pairs.append((vocab[w], vocab[tokens[j]]))
+        return pairs
 
-    # Apply freezing
-    freeze_layers(model, freeze_selected)
+    training_data = generate_pairs(tokens, window_size)
 
-    # Take snapshot
-    before = snapshot(model)
+    # ----------------------------------
+    # Word2Vec Model
+    # ----------------------------------
+    class Word2Vec(nn.Module):
+        def __init__(self, vocab_size, embed_dim):
+            super().__init__()
+            self.emb = nn.Embedding(vocab_size, embed_dim)
+            self.out = nn.Linear(embed_dim, vocab_size)
 
-    # Train
-    train_steps(model, steps=steps, lr=lr, batch=batch)
+        def forward(self, x):
+            return self.out(self.emb(x))
 
-    # After snapshot
-    after = snapshot(model)
+    model = Word2Vec(len(vocab), embed_dim)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
 
-    # Compute diffs
-    diffs = compute_diff(before, after)
+    st.write("### 🔄 Training...")
+    progress = st.progress(0)
 
-    # Display table
-    st.write("### Layer Parameter Changes (Max Abs Diff)")
-    st.table({"Layer": list(diffs.keys()), "Max Change": list(diffs.values())})
+    for epoch in range(epochs):
+        total_loss = 0
+        for c, o in training_data:
+            c = torch.tensor([c])
+            o = torch.tensor([o])
 
-    # Bar plot
-    fig, ax = plt.subplots()
-    ax.bar(list(diffs.keys()), list(diffs.values()))
-    ax.set_ylabel("Max Param Change")
-    ax.set_title("Layer Learning Visualization")
-    st.pyplot(fig)
+            optimizer.zero_grad()
+            loss = criterion(model(c), o)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
 
-st.info("Use the checkboxes on the left to freeze specific layers.")
+        progress.progress((epoch + 1) / epochs)
+        if (epoch + 1) % 10 == 0:
+            st.write(f"Epoch {epoch+1}, Loss: {total_loss:.4f}")
+
+    st.success("Training Completed ✔")
+
+    # Save to session_state
+    st.session_state["vocab"] = vocab
+    st.session_state["embeddings"] = model.emb.weight.data
+    st.session_state["trained"] = True
+
+
+# ------------------------------
+# Embedding Lookup Section
+# ------------------------------
+st.subheader("🔍 Lookup Word Embedding")
+
+query_word = st.text_input("Enter a word to view its embedding:")
+
+if st.button("Get Embedding"):
+    if "trained" not in st.session_state:
+        st.error("⚠ Please train the model first!")
+    else:
+        vocab = st.session_state["vocab"]
+        embeddings = st.session_state["embeddings"]
+
+        if query_word.lower() in vocab:
+            st.write(f"### Embedding for **{query_word}**")
+            st.write(embeddings[vocab[query_word.lower()]])
+        else:
+            st.error("Word not found in vocabulary!")
